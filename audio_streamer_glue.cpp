@@ -2,8 +2,11 @@
 #include <cstring>
 #include "mod_audio_stream.h"
 #include <ixwebsocket/IXWebSocket.h>
-
 #include <switch_json.h>
+#include <fstream>
+#include <unordered_map>
+#include <unordered_set>
+#include "base64.h"
 
 #define FRAME_SIZE_8000  320 /* 1000x0.02 (20ms)= 160 x(16bit= 2 bytes) 320 frame size*/
 
@@ -16,7 +19,7 @@ public:
 
     AudioStreamer(const char* uuid, const char* wsUri, responseHandler_t callback, int deflate, int heart_beat, const char* initialMeta,
                     bool globalTrace, bool suppressLog): m_sessionId(uuid), m_notify(callback), m_initial_meta(initialMeta),
-                                                            m_global_trace(globalTrace), m_suppress_log(suppressLog){
+                                                            m_global_trace(globalTrace), m_suppress_log(suppressLog), m_playFile(0){
 
         webSocket.setUrl(wsUri);
 
@@ -123,18 +126,81 @@ public:
                     break;
                 case MESSAGE:
                     if(!m_suppress_log)
-                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO, "response: %s\n", message);
-                    if(m_global_trace) {
-                        if(filter_json_string(psession, message) == SWITCH_TRUE) {
-                            m_notify(psession, EVENT_JSON, message);
-                        }
-                    } else {
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG, "response: %s\n", message);
+                    if(processAudio(psession, message) != SWITCH_TRUE) {
                         m_notify(psession, EVENT_JSON, message);
                     }
                     break;
             }
             switch_core_session_rwunlock(psession);
         }
+    }
+
+    switch_bool_t processAudio(switch_core_session_t* session, const char* message) {
+        cJSON* json = cJSON_Parse(message);
+        switch_bool_t status = SWITCH_FALSE;
+        if (!json) {
+            return status;
+        }
+        const char* jsType = nullptr;
+        jsType = cJSON_GetObjectCstr(json, "type");
+        if(strcmp(jsType, "streamAudio") == 0) {
+            cJSON* jsonData = cJSON_GetObjectItem(json, "data");
+            if(jsonData) {
+                cJSON* jsonFile = nullptr;
+                cJSON* jsonAudio = cJSON_DetachItemFromObject(jsonData, "audioData");
+
+                const char* jsAudioDataType = cJSON_GetObjectCstr(jsonData, "audioDataType");
+                std::string fileType;
+                int sampleRate;
+                if (0 == strcmp(jsAudioDataType, "raw")) {
+                    cJSON* jsonSampleRate = cJSON_GetObjectItem(jsonData, "sampleRate");
+                    sampleRate = jsonSampleRate && jsonSampleRate->valueint ? jsonSampleRate->valueint : 0;
+                    std::unordered_map<int, const char*> sampleRateMap = {
+                            {8000, ".r8"},
+                            {16000, ".r16"},
+                            {24000, ".r24"},
+                            {32000, ".r32"},
+                            {48000, ".r48"},
+                            {64000, ".r64"}
+                    };
+                    auto it = sampleRateMap.find(sampleRate);
+                    fileType = (it != sampleRateMap.end()) ? it->second : "";
+                } else if (0 == strcmp(jsAudioDataType, "wav")) {
+                    fileType = ".wav";
+                } else {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%s) processAudio - unsupported audio type: %s\n",
+                                      m_sessionId.c_str(), jsAudioDataType);
+                }
+
+                if(jsonAudio && jsonAudio->valuestring != nullptr && !fileType.empty()) {
+                    char filePath[256];
+                    std::string rawAudio = base64_decode(jsonAudio->valuestring);
+                    switch_snprintf(filePath, 256, "%s%s%s_%d.tmp%s", SWITCH_GLOBAL_dirs.temp_dir,
+                                    SWITCH_PATH_SEPARATOR, m_sessionId.c_str(), m_playFile++, fileType.c_str());
+                    std::ofstream fstream(filePath, std::ofstream::binary);
+                    fstream << rawAudio;
+                    fstream.close();
+                    playBackFiles.insert(filePath);
+                    jsonFile = cJSON_CreateString(filePath);
+                    cJSON_AddItemToObject(jsonData, "file", jsonFile);
+                }
+
+                if(jsonFile) {
+                    char *jsonString = cJSON_PrintUnformatted(jsonData);
+                    m_notify(session, EVENT_PLAY, jsonString);
+                    free(jsonString);
+                    status = SWITCH_TRUE;
+                }
+                if (jsonAudio)
+                    cJSON_Delete(jsonAudio);
+
+            } else {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%s) processAudio - no data in streamAudio\n", m_sessionId.c_str());
+            }
+        }
+        cJSON_Delete(json);
+        return status;
     }
 
     ~AudioStreamer()= default;
@@ -158,6 +224,14 @@ public:
         webSocket.sendUtf8Text(ix::IXWebSocketSendData(text, strlen(text)));
     }
 
+    void deleteFiles() {
+        if(m_playFile >0) {
+            for (const auto &fileName: playBackFiles) {
+                remove(fileName.c_str());
+            }
+        }
+    }
+
 private:
     std::string m_sessionId;
     responseHandler_t m_notify;
@@ -165,6 +239,8 @@ private:
     const char* m_initial_meta;
     bool m_suppress_log;
     bool m_global_trace;
+    int m_playFile;
+    std::unordered_set<std::string> playBackFiles;
 };
 
 
@@ -619,6 +695,7 @@ extern "C" {
 
             auto* audioStreamer = (AudioStreamer *) tech_pvt->pAudioStreamer;
             if(audioStreamer) {
+                audioStreamer->deleteFiles();
                 if (text) audioStreamer->writeText(text);
                 finish(tech_pvt);
             }
