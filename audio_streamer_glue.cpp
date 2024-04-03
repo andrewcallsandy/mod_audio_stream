@@ -355,6 +355,7 @@ namespace {
 
 extern "C" {
     switch_status_t do_pauseresume(switch_core_session_t *session, int pause);
+    switch_status_t do_pauseresume(switch_core_session_t *session, int pause);
     int validate_ws_uri(const char* url, char* wsUri) {
         const char* scheme = nullptr;
         const char* hostStart = nullptr;
