@@ -1,6 +1,7 @@
 #include <random>
 #include <string>
 #include <cstring>
+#include "audio_streamer_glue.h"
 #include "mod_audio_stream.h"
 #include <ixwebsocket/IXWebSocket.h>
 #include <switch_json.h>
@@ -355,7 +356,6 @@ namespace {
 
 extern "C" {
     switch_status_t do_pauseresume(switch_core_session_t *session, int pause);
-    switch_status_t do_pauseresume(switch_core_session_t *session, int pause);
     int validate_ws_uri(const char* url, char* wsUri) {
         const char* scheme = nullptr;
         const char* hostStart = nullptr;
@@ -534,20 +534,20 @@ extern "C" {
     }
 
         // Function to generate a random streamSid
-    static std::string generateStreamSid() {
-        const std::string characters =
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-        std::string streamSid = "MZ";
-        
-        std::random_device rd;  // Obtain a random number from hardware
-        std::mt19937 gen(rd()); // Seed the generator
-        std::uniform_int_distribution<> distr(0, characters.size() - 1);
+static std::string generateStreamSid() {
+    const std::string characters =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    std::string streamSid = "MZ";
+    
+    std::random_device rd;  // Obtain a random number from hardware
+    std::mt19937 gen(rd()); // Seed the generator
+    std::uniform_int_distribution<> distr(0, characters.size() - 1);
 
-        for (int i = 0; i < 32; ++i) {
-            streamSid += characters[distr(gen)]; // Use `distr(gen)` instead of `rand()`
-        }
-        return streamSid;
+    for (int i = 0; i < 32; ++i) {
+        streamSid += characters[distr(gen)]; // Use `distr(gen)` instead of `rand()`
     }
+    return streamSid;
+}
     switch_bool_t stream_frame(switch_media_bug_t *bug) {
         auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
             if (!tech_pvt || tech_pvt->audio_paused) return SWITCH_TRUE;
