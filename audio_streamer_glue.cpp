@@ -137,71 +137,47 @@ public:
     }
 
     switch_bool_t processAudio(switch_core_session_t* session, const char* message) {
-        cJSON* json = cJSON_Parse(message);
-        switch_bool_t status = SWITCH_FALSE;
-        if (!json) {
-            return status;
-        }
-        const char* jsType = nullptr;
-        jsType = cJSON_GetObjectCstr(json, "type");
-        if(strcmp(jsType, "streamAudio") == 0) {
-            cJSON* jsonData = cJSON_GetObjectItem(json, "data");
-            if(jsonData) {
-                cJSON* jsonFile = nullptr;
-                cJSON* jsonAudio = cJSON_DetachItemFromObject(jsonData, "audioData");
-
-                const char* jsAudioDataType = cJSON_GetObjectCstr(jsonData, "audioDataType");
-                std::string fileType;
-                int sampleRate;
-                if (0 == strcmp(jsAudioDataType, "raw")) {
-                    cJSON* jsonSampleRate = cJSON_GetObjectItem(jsonData, "sampleRate");
-                    sampleRate = jsonSampleRate && jsonSampleRate->valueint ? jsonSampleRate->valueint : 0;
-                    std::unordered_map<int, const char*> sampleRateMap = {
-                            {8000, ".r8"},
-                            {16000, ".r16"},
-                            {24000, ".r24"},
-                            {32000, ".r32"},
-                            {48000, ".r48"},
-                            {64000, ".r64"}
-                    };
-                    auto it = sampleRateMap.find(sampleRate);
-                    fileType = (it != sampleRateMap.end()) ? it->second : "";
-                } else if (0 == strcmp(jsAudioDataType, "wav")) {
-                    fileType = ".wav";
-                } else {
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%s) processAudio - unsupported audio type: %s\n",
-                                      m_sessionId.c_str(), jsAudioDataType);
-                }
-
-                if(jsonAudio && jsonAudio->valuestring != nullptr && !fileType.empty()) {
-                    char filePath[256];
-                    std::string rawAudio = base64_decode(jsonAudio->valuestring);
-                    switch_snprintf(filePath, 256, "%s%s%s_%d.tmp%s", SWITCH_GLOBAL_dirs.temp_dir,
-                                    SWITCH_PATH_SEPARATOR, m_sessionId.c_str(), m_playFile++, fileType.c_str());
-                    std::ofstream fstream(filePath, std::ofstream::binary);
-                    fstream << rawAudio;
-                    fstream.close();
-                    playBackFiles.insert(filePath);
-                    jsonFile = cJSON_CreateString(filePath);
-                    cJSON_AddItemToObject(jsonData, "file", jsonFile);
-                }
-
-                if(jsonFile) {
-                    char *jsonString = cJSON_PrintUnformatted(jsonData);
-                    m_notify(session, EVENT_PLAY, jsonString);
-                    free(jsonString);
-                    status = SWITCH_TRUE;
-                }
-                if (jsonAudio)
-                    cJSON_Delete(jsonAudio);
-
-            } else {
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%s) processAudio - no data in streamAudio\n", m_sessionId.c_str());
-            }
-        }
-        cJSON_Delete(json);
+    cJSON* json = cJSON_Parse(message);
+    switch_bool_t status = SWITCH_FALSE;
+    if (!json) {
         return status;
     }
+    const char* event = cJSON_GetObjectCstr(json, "event");
+    if (strcmp(event, "clear") == 0) {
+    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Received clear event, pausing stream playback\n");
+    do_pauseresume(session, 1);
+    status = SWITCH_TRUE;
+    }
+
+    if (strcmp(event, "media") == 0) {
+        cJSON* media = cJSON_GetObjectItem(json, "media");
+        if (media) {
+            cJSON* payload = cJSON_GetObjectItem(media, "payload");
+            if (payload && payload->valuestring != nullptr) {
+                std::string encodedAudio = payload->valuestring;
+                std::string rawAudio = base64_decode(encodedAudio);
+
+                char filePath[256];
+                switch_snprintf(filePath, 256, "%s%s%s_%d.tmp.raw", SWITCH_GLOBAL_dirs.temp_dir,
+                                SWITCH_PATH_SEPARATOR, m_sessionId.c_str(), m_playFile++);
+                std::ofstream fstream(filePath, std::ofstream::binary);
+                fstream << rawAudio;
+                fstream.close();
+                playBackFiles.insert(filePath);
+
+                cJSON* jsonFile = cJSON_CreateString(filePath);
+                cJSON_AddItemToObject(media, "file", jsonFile);
+
+                char* jsonString = cJSON_PrintUnformatted(media);
+                m_notify(session, EVENT_PLAY, jsonString);
+                free(jsonString);
+                status = SWITCH_TRUE;
+            }
+        }
+    }
+    cJSON_Delete(json);
+    return status;
+}
 
     ~AudioStreamer()= default;
 
@@ -368,6 +344,7 @@ namespace {
 }
 
 extern "C" {
+    switch_status_t do_pauseresume(switch_core_session_t *session, int pause);
     int validate_ws_uri(const char* url, char* wsUri) {
         const char* scheme = nullptr;
         const char* hostStart = nullptr;
@@ -545,6 +522,16 @@ extern "C" {
         return SWITCH_STATUS_SUCCESS;
     }
 
+        // Function to generate a random streamSid
+    std::string generateStreamSid() {
+        const std::string characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        std::string streamSid = "MZ";
+        for (int i = 0; i < 32; i++) {
+            streamSid += characters[rand() % characters.length()];
+        }
+        return streamSid;
+    }
+
     switch_bool_t stream_frame(switch_media_bug_t *bug)
     {
         auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
@@ -564,6 +551,9 @@ extern "C" {
                 return SWITCH_TRUE;
             }
 
+            // Generate a dynamic streamSid
+            std::string streamSid = generateStreamSid();
+
             if (nullptr == tech_pvt->resampler) {
                 uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
                 switch_frame_t frame = {};
@@ -572,36 +562,22 @@ extern "C" {
                 size_t available = ringBufferFreeSpace(tech_pvt->buffer);
                 while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
                     if(frame.datalen) {
-                        if (1 == tech_pvt->rtp_packets) {
-                            pAudioStreamer->writeBinary((uint8_t *) frame.data, frame.datalen);
-                            continue;
-                        }
+                        // Encode the audio data in base64
+                        std::string base64_audio = base64_encode(frame.data, frame.datalen);
 
-                        size_t remaining = 0;
-                        if(available >= frame.datalen) {
-                            ringBufferAppendMultiple(tech_pvt->buffer, static_cast<uint8_t *>(frame.data), frame.datalen);
-                        } else {
-                            // The remaining space is not sufficient for the entire chunk
-                            // so write first part up to the available space
-                            ringBufferAppendMultiple(tech_pvt->buffer, static_cast<uint8_t *>(frame.data), available);
-                            remaining = frame.datalen - available;
-                        }
+                        // Construct the JSON message in the required format
+                        cJSON* jsonMessage = cJSON_CreateObject();
+                        cJSON_AddStringToObject(jsonMessage, "event", "media");
+                        cJSON_AddStringToObject(jsonMessage, "streamSid", streamSid.c_str());
+                        cJSON* jsonMedia = cJSON_CreateObject();
+                        cJSON_AddStringToObject(jsonMedia, "payload", base64_audio.c_str());
+                        cJSON_AddItemToObject(jsonMessage, "media", jsonMedia);
 
-                        if(0 == ringBufferFreeSpace(tech_pvt->buffer)) {
-                            size_t nFrames = ringBufferLen(tech_pvt->buffer);
-                            size_t nBytes = nFrames + remaining;
-                            uint8_t chunkPtr[nBytes];
-                            ringBufferGetMultiple(tech_pvt->buffer, &chunkPtr[0], nBytes);
-
-                            if(remaining > 0) {
-                                memcpy(&chunkPtr[nBytes - remaining], static_cast<uint8_t *>(frame.data) + frame.datalen - remaining, remaining);
-                            }
-
-                            pAudioStreamer->writeBinary(chunkPtr, nBytes);
-
-                            ringBufferClear(tech_pvt->buffer);
-                        }
-
+                        // Send the JSON message to the WebSocket
+                        char* jsonString = cJSON_PrintUnformatted(jsonMessage);
+                        pAudioStreamer->writeText(jsonString);
+                        free(jsonString);
+                        cJSON_Delete(jsonMessage);
                     }
                 }
             } else {
@@ -627,47 +603,23 @@ extern "C" {
 
                         if(out_len > 0) {
                             size_t bytes_written = out_len << tech_pvt->channels;
-                            if (1 == tech_pvt->rtp_packets) {
-                                pAudioStreamer->writeBinary((uint8_t *) out, bytes_written);
-                                continue;
-                            }
-                            if (bytes_written <= available) {
-                                // Case 1: Resampled data fits entirely in the buffer
-                                ringBufferAppendMultiple(tech_pvt->buffer, (const uint8_t *)out, bytes_written);
-                            } else {
-                                // Case 2: Resampled data partially fits in the buffer
-                                ringBufferAppendMultiple(tech_pvt->buffer, (const uint8_t *)out, available);
-                                remaining = bytes_written - available;
-                            }
+                            // Encode the resampled audio data in base64
+                            std::string base64_audio = base64_encode((const char*)out, bytes_written);
 
-                            // Update available space in the buffer
-                            available -= bytes_written;
-                            if(available <= 2) {
+                            // Construct the JSON message in the required format
+                            cJSON* jsonMessage = cJSON_CreateObject();
+                            cJSON_AddStringToObject(jsonMessage, "event", "media");
+                            cJSON_AddStringToObject(jsonMessage, "streamSid", streamSid.c_str());
+                            cJSON* jsonMedia = cJSON_CreateObject();
+                            cJSON_AddStringToObject(jsonMedia, "payload", base64_audio.c_str());
+                            cJSON_AddItemToObject(jsonMessage, "media", jsonMedia);
 
-                                spx_uint32_t in_len_rem = frame.samples-in_len;
-                                spx_uint32_t out_len_rem = SWITCH_RECOMMENDED_BUFFER_SIZE;
-                                spx_int16_t out_rem[SWITCH_RECOMMENDED_BUFFER_SIZE];
-                                speex_resampler_process_interleaved_int(tech_pvt->resampler,
-                                                                        (const spx_int16_t *)frame.data+in_len, //in_len_rem
-                                                                        (spx_uint32_t *) &in_len_rem,
-                                                                        &out_rem[0],
-                                                                        &out_len_rem);
-                                if(out_len_rem > 0) {
-                                    size_t rem_bytes = out_len_rem << tech_pvt->channels;
-                                    //size_t rem_bytes = out_len_rem * tech_pvt->channels * sizeof(spx_int16_t);
-                                    size_t bufferLen = ringBufferLen(tech_pvt->buffer);
-                                    size_t nFrames = bufferLen + rem_bytes;
-                                    uint8_t bufferPtr[nFrames];
-                                    ringBufferGetMultiple(tech_pvt->buffer, &bufferPtr[0], bufferLen);
-                                    //size_t lastFrame = bytes_written + rem_bytes;
-                                    memcpy(&bufferPtr[bufferLen], (uint8_t*)&out_rem[0], rem_bytes);
-                                    ringBufferClear(tech_pvt->buffer);
-                                    pAudioStreamer->writeBinary(&bufferPtr[0], nFrames);
-                                }
-
-                            }
+                            // Send the JSON message to the WebSocket
+                            char* jsonString = cJSON_PrintUnformatted(jsonMessage);
+                            pAudioStreamer->writeText(jsonString);
+                            free(jsonString);
+                            cJSON_Delete(jsonMessage);
                         }
-
                     }
                 }
             }
