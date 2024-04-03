@@ -1,3 +1,4 @@
+#include <random>
 #include <string>
 #include <cstring>
 #include "mod_audio_stream.h"
@@ -9,6 +10,7 @@
 #include "base64.h"
 
 #define FRAME_SIZE_8000  320 /* 1000x0.02 (20ms)= 160 x(16bit= 2 bytes) 320 frame size*/
+static std::string generateStreamSid();
 
 namespace {
     extern switch_bool_t filter_json_string(switch_core_session_t *session, const char* message);
@@ -144,10 +146,18 @@ public:
     }
     const char* event = cJSON_GetObjectCstr(json, "event");
     if (strcmp(event, "clear") == 0) {
-    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Received clear event, pausing stream playback\n");
-    do_pauseresume(session, 1);
-    status = SWITCH_TRUE;
+    // Log the reception of the clear event
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Received clear event, pausing stream playback\n");
+    // Attempt to pause the audio stream
+        if (do_pauseresume(session, 1) != SWITCH_STATUS_SUCCESS) {
+            // If pausing fails, log an error
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to pause audio stream on clear event\n");
+        } else {
+            // If pausing is successful, set status to true
+            status = SWITCH_TRUE;
+        }
     }
+
 
     if (strcmp(event, "media") == 0) {
         cJSON* media = cJSON_GetObjectItem(json, "media");
@@ -523,88 +533,51 @@ extern "C" {
     }
 
         // Function to generate a random streamSid
-    std::string generateStreamSid() {
-        const std::string characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    static std::string generateStreamSid() {
+        const std::string characters =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
         std::string streamSid = "MZ";
-        for (int i = 0; i < 32; i++) {
-            streamSid += characters[rand() % characters.length()];
+        
+        std::random_device rd;  // Obtain a random number from hardware
+        std::mt19937 gen(rd()); // Seed the generator
+        std::uniform_int_distribution<> distr(0, characters.size() - 1);
+
+        for (int i = 0; i < 32; ++i) {
+            streamSid += characters[distr(gen)]; // Use `distr(gen)` instead of `rand()`
         }
         return streamSid;
     }
-
-    switch_bool_t stream_frame(switch_media_bug_t *bug)
-    {
+    switch_bool_t stream_frame(switch_media_bug_t *bug) {
         auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
-        if (!tech_pvt || tech_pvt->audio_paused) return SWITCH_TRUE;
+            if (!tech_pvt || tech_pvt->audio_paused) return SWITCH_TRUE;
 
-        if (switch_mutex_trylock(tech_pvt->mutex) == SWITCH_STATUS_SUCCESS) {
+            if (switch_mutex_trylock(tech_pvt->mutex) == SWITCH_STATUS_SUCCESS) {
 
-            if (!tech_pvt->pAudioStreamer) {
-                switch_mutex_unlock(tech_pvt->mutex);
-                return SWITCH_TRUE;
-            }
-
-            auto *pAudioStreamer = static_cast<AudioStreamer *>(tech_pvt->pAudioStreamer);
-
-            if(!pAudioStreamer->isConnected()) {
-                switch_mutex_unlock(tech_pvt->mutex);
-                return SWITCH_TRUE;
-            }
-
-            // Generate a dynamic streamSid
-            std::string streamSid = generateStreamSid();
-
-            if (nullptr == tech_pvt->resampler) {
-                uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
-                switch_frame_t frame = {};
-                frame.data = data;
-                frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
-                size_t available = ringBufferFreeSpace(tech_pvt->buffer);
-                while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
-                    if(frame.datalen) {
-                        // Encode the audio data in base64
-                        std::string base64_audio = base64_encode(frame.data, frame.datalen);
-
-                        // Construct the JSON message in the required format
-                        cJSON* jsonMessage = cJSON_CreateObject();
-                        cJSON_AddStringToObject(jsonMessage, "event", "media");
-                        cJSON_AddStringToObject(jsonMessage, "streamSid", streamSid.c_str());
-                        cJSON* jsonMedia = cJSON_CreateObject();
-                        cJSON_AddStringToObject(jsonMedia, "payload", base64_audio.c_str());
-                        cJSON_AddItemToObject(jsonMessage, "media", jsonMedia);
-
-                        // Send the JSON message to the WebSocket
-                        char* jsonString = cJSON_PrintUnformatted(jsonMessage);
-                        pAudioStreamer->writeText(jsonString);
-                        free(jsonString);
-                        cJSON_Delete(jsonMessage);
-                    }
+                if (!tech_pvt->pAudioStreamer) {
+                    switch_mutex_unlock(tech_pvt->mutex);
+                    return SWITCH_TRUE;
                 }
-            } else {
-                uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
-                switch_frame_t frame = {};
-                frame.data = data;
-                frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
-                size_t available = ringBufferFreeSpace(tech_pvt->buffer);
 
-                while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
-                    if(frame.datalen) {
-                        spx_uint32_t in_len = frame.samples;
-                        spx_uint32_t out_len = available >> 1;
-                        spx_int16_t out[available];
+                auto *pAudioStreamer = static_cast<AudioStreamer *>(tech_pvt->pAudioStreamer);
 
-                        speex_resampler_process_interleaved_int(tech_pvt->resampler,
-                                (const spx_int16_t *)frame.data,
-                                (spx_uint32_t *) &in_len,
-                                &out[0],
-                                &out_len);
+                if(!pAudioStreamer->isConnected()) {
+                    switch_mutex_unlock(tech_pvt->mutex);
+                    return SWITCH_TRUE;
+                }
 
-                        size_t remaining = 0;
+                // Generate a dynamic streamSid
+                std::string streamSid = generateStreamSid();
 
-                        if(out_len > 0) {
-                            size_t bytes_written = out_len << tech_pvt->channels;
-                            // Encode the resampled audio data in base64
-                            std::string base64_audio = base64_encode((const char*)out, bytes_written);
+                if (nullptr == tech_pvt->resampler) {
+                    uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
+                    switch_frame_t frame = {};
+                    frame.data = data;
+                    frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
+                    size_t available = ringBufferFreeSpace(tech_pvt->buffer);
+                    while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
+                        if(frame.datalen) {
+                            // Encode the audio data in base64
+                            std::string base64_audio = base64_encode(static_cast<const unsigned char*>(frame.data), frame.datalen);
 
                             // Construct the JSON message in the required format
                             cJSON* jsonMessage = cJSON_CreateObject();
@@ -621,12 +594,53 @@ extern "C" {
                             cJSON_Delete(jsonMessage);
                         }
                     }
+                } else {
+                    uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
+                    switch_frame_t frame = {};
+                    frame.data = data;
+                    frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
+                    size_t available = ringBufferFreeSpace(tech_pvt->buffer);
+
+                    while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
+                        if(frame.datalen) {
+                            spx_uint32_t in_len = frame.samples;
+                            spx_uint32_t out_len = available >> 1;
+                            spx_int16_t out[available];
+
+                            speex_resampler_process_interleaved_int(tech_pvt->resampler,
+                                    (const spx_int16_t *)frame.data,
+                                    (spx_uint32_t *) &in_len,
+                                    &out[0],
+                                    &out_len);
+
+                            size_t remaining = 0;
+
+                            if(out_len > 0) {
+                                size_t bytes_written = out_len << tech_pvt->channels;
+                                // Encode the resampled audio data in base64
+                                std::string base64_audio = base64_encode(reinterpret_cast<const unsigned char*>(out), bytes_written);
+
+                                // Construct the JSON message in the required format
+                                cJSON* jsonMessage = cJSON_CreateObject();
+                                cJSON_AddStringToObject(jsonMessage, "event", "media");
+                                cJSON_AddStringToObject(jsonMessage, "streamSid", streamSid.c_str());
+                                cJSON* jsonMedia = cJSON_CreateObject();
+                                cJSON_AddStringToObject(jsonMedia, "payload", base64_audio.c_str());
+                                cJSON_AddItemToObject(jsonMessage, "media", jsonMedia);
+
+                                // Send the JSON message to the WebSocket
+                                char* jsonString = cJSON_PrintUnformatted(jsonMessage);
+                                pAudioStreamer->writeText(jsonString);
+                                free(jsonString);
+                                cJSON_Delete(jsonMessage);
+                            }
+                        }
+                    }
                 }
+                switch_mutex_unlock(tech_pvt->mutex);
             }
-            switch_mutex_unlock(tech_pvt->mutex);
+            return SWITCH_TRUE;
         }
-        return SWITCH_TRUE;
-    }
 
     switch_status_t stream_session_cleanup(switch_core_session_t *session, char* text, int channelIsClosing) {
         switch_channel_t *channel = switch_core_session_get_channel(session);
