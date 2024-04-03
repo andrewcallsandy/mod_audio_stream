@@ -150,7 +150,7 @@ public:
     // Log the reception of the clear event
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Received clear event, pausing stream playback\n");
     // Attempt to pause the audio stream
-        if (do_pauseresume(session, 1) != SWITCH_STATUS_SUCCESS) {
+        if (stream_session_pauseresume(session, 1) != SWITCH_STATUS_SUCCESS) {
             // If pausing fails, log an error
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to pause audio stream on clear event\n");
         } else {
@@ -355,7 +355,7 @@ namespace {
 }
 
 extern "C" {
-    switch_status_t do_pauseresume(switch_core_session_t *session, int pause);
+    switch_status_t stream_session_pauseresume(switch_core_session_t *session, int pause);
     int validate_ws_uri(const char* url, char* wsUri) {
         const char* scheme = nullptr;
         const char* hostStart = nullptr;
